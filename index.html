@@ -233,13 +233,7 @@
 <div id="multi" class="panel hidden">
   <h1>Мультиплеер</h1>
   <div class="card menucard">
-    <p>Все в одной комнате видят друг друга и строят один и тот же мир. Монеты и рекорды остаются вашими.</p>
-    <input id="mpCode" class="field" placeholder="Код комнаты (латиница, 3-20)" maxlength="20" autocomplete="off">
-    <button class="btn play" data-act="mpJoin">Войти в комнату</button>
-    <button class="btn sec" data-act="mpCreate" style="width:100%">Создать комнату</button>
-    <p id="mpStatus" style="min-height:1.2em"></p>
-    <div class="card" style="text-align:left;margin-top:8px"><b>Игроки в комнате</b><div id="mpList" style="margin-top:6px;font-size:14px"></div></div>
-    <button class="btn sec" data-act="mpLeave" style="width:100%">Выйти из комнаты</button>
+    <div id="mpBody"></div>
     <button class="btn" data-act="back">Назад</button>
   </div>
 </div>
@@ -267,7 +261,7 @@ const STICK_R = 60;
 const CELL = 4.2, PLAT = 3.0, RISE = 1.5;
 const SNOW_N = 900;
 const BIOME_LEN = 15;
-const GAME_VERSION = 'V9.2';
+const GAME_VERSION = 'V9.3';
 const GAME_NAME = 'Бесконечные прыжки';
 const SAVE_KEY = 'gjump3d_v6';
 
@@ -894,6 +888,7 @@ function spawnNext() {
   }
 }
 function spawnAhead() {
+  if (mpPhase === 'arena') return;
   while (frontier.top < py + 26) spawnNext();
 }
 
@@ -925,7 +920,7 @@ function resetWorld() {
   for (const d of decor) scene.remove(d.g);
   platforms = []; coins = []; puffs = []; decor = [];
   platformCount = 0;
-  resetWorldSeed(mpRoomName ? hashStr(mpRoomName) : (Math.random() * 4294967296) >>> 0);
+  resetWorldSeed(mpSeed !== null ? mpSeed : (Math.random() * 4294967296) >>> 0);
   const start = makePlatform(0, 0, 0, 4);
   start.t = 1;
   platforms.push(start);
@@ -1100,6 +1095,7 @@ function update(dt) {
   }
   abilCd = Math.max(0, abilCd - dt);
   jumpBuf = Math.max(0, jumpBuf - dt);
+  if (mpPhase === 'arena') jumpBuf = 0;
   coyote = grounded ? 0.12 : Math.max(0, coyote - dt);
 
   const frozen = freezeT > 0;
@@ -1168,7 +1164,8 @@ function update(dt) {
       maxH = py;
       deathFloor = Math.max(deathFloor, maxH - 3);
     }
-    if (!flying && (py < deathFloor || py < -30)) {
+    if (mpPhase === 'arena' && py < -3) { px = mpArenaSpawn.x; pz = mpArenaSpawn.z; py = 0; vx = 0; vz = 0; vy = 0; grounded = true; ground = mpArenaPlat; }
+    if (!flying && mpPhase !== 'arena' && (py < deathFloor || py < -30)) {
       if (shields > 0 && lastSafe) {
         shields--;
         px = lastSafe.x; pz = lastSafe.z; py = lastSafe.top + 1.5;
@@ -1206,6 +1203,7 @@ function magnetR() { return 1.0 + upg.magnet * 0.6; }
 function runSpeed() { return 7 + upg.speed * 0.8; }
 
 function die() {
+  mpOnLocalDeath();
   if (!playing) return;
   playing = false;
   dying = true;
@@ -1677,18 +1675,20 @@ function act(name) {
     show('menu');
     return;
   }
-  if (name === 'play') startGame();
+  if (name === 'play') { if (mpRoom) { if (mpPhase === 'run') mpResetLobby(); else mpShowLobby(); } else startGame(); }
   if (name === 'shop') { shopFrom = ui || 'pause'; renderShop(); show('shop'); }
   if (name === 'back') { updateMenuStats(); show(shopFrom); }
   if (name === 'resume') resumeGame();
   if (name === 'exit') exitToMenu();
   if (name === 'multi') { shopFrom = ui || 'menu'; mpRender(); show('multi'); return; }
-  if (name === 'mpCreate') { document.getElementById('mpCode').value = randomRoomCode(); mpJoin(randomRoomCode()); return; }
-  if (name === 'mpJoin') { mpJoin(document.getElementById('mpCode').value); return; }
+  if (name === 'mpCreate') { mpJoin(randomRoomCode()); return; }
+  if (name === 'mpReady') { mpToggleReady(); return; }
+  if (name === 'mpJoin') { const ci = document.getElementById('mpCode'); mpJoin(ci ? ci.value : ''); return; }
   if (name === 'mpLeave') { mpLeave(); return; }
 }
 
 function startGame() {
+  if (mpRoom) { if (!playing && !dying && mpPhase === '') mpShowLobby(); return; }
   if (playing || !account) return;
   if (!created) { openCreator(); return; }
   audioInit();
@@ -1712,6 +1712,7 @@ function resumeGame() {
   show(null);
 }
 function exitToMenu() {
+  if (mpPhase) { mpPhase = ''; mpLocal.ready = false; mpLocal.rt = 0; mpSeed = null; mpSend(); }
   best = Math.max(best, Math.floor(maxH));
   save();
   playing = false; dying = false; paused = false;
@@ -1907,7 +1908,9 @@ function frame(now) {
   }
   const fh = document.getElementById('flyHud');
   const wid = wingId();
-  if (playing && freezeT > 0) {
+  if (playing && mpPhase === 'arena') {
+    fh.textContent = 'Двигайтесь, чтобы начать забег';
+  } else if (playing && freezeT > 0) {
     fh.textContent = `Приземление: не двигайтесь ${Math.ceil(freezeT)} с`;
   } else if (playing && wid) {
     const passive = !ABIL_NAME[wid] || wid === 'wings' || wid === 'batwings';
@@ -1944,7 +1947,15 @@ let roomNs = null;
 if (window.claude && typeof window.claude.use === 'function') {
   window.claude.use('room').then(ns => { roomNs = ns || null; }).catch(() => {});
 }
+
 let mpRoom = null, mpRoomName = '', mpUnsubs = [], mpSendT = 0, mpPeers = [];
+let mpPhase = '';          // '' lobby, 'arena' both on the small platform, 'run' shared run
+let mpRunId = 0;           // same for everyone in one run
+let mpSeed = null;         // same world for everyone in one run
+let mpArenaPlat = null;
+let mpArenaSpawn = { x: 0, z: 0 };
+let mpMoved = false;
+let mpLocal = { ready: false, rt: 0, go: null, dx: null };
 const ghosts = new Map();
 
 function randomRoomCode() {
@@ -1960,54 +1971,90 @@ function mpStatus(text, ok) {
 function mpNormalize(raw) {
   return String(raw || '').trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 20);
 }
-async function mpJoin(raw) {
-  if (!account) { mpStatus('Сначала войдите в аккаунт', false); return; }
-  const name = mpNormalize(raw);
-  if (name.length < 3) { mpStatus('Код: от 3 символов, латиница, цифры, _ . -', false); return; }
-  if (!roomNs) { mpStatus('Мультиплеер работает только в открытой странице Claude', false); return; }
-  if (mpRoom && mpRoomName === name) return;
-  await mpLeave();
-  mpStatus('Подключаем...', true);
-  try {
-    const room = await roomNs.join(name);
-    mpRoom = room;
-    mpRoomName = name;
-    mpUnsubs.push(room.onPeers(ch => { mpPeers = ch.peers; mpRender(); }, e => mpStatus('Связь: ' + e.code, false)));
-    mpUnsubs.push(room.onConnection(c => mpStatus(c ? 'В комнате ' + name : 'Нет связи, переподключаемся...', c), () => {}));
-    mpStatus('В комнате ' + name, true);
-    mpSendT = 0;
-    updateMenuStats();
-    mpRender();
-  } catch (e) {
-    mpStatus('Не удалось войти: ' + (e && e.code ? e.code : 'ошибка'), false);
-  }
+function mpMembers() {
+  return mpPeers.filter(p => p.isMe || (p.presence && p.presence.n));
 }
-async function mpLeave() {
-  for (const u of mpUnsubs) { try { u(); } catch (e) {} }
-  mpUnsubs = [];
-  if (mpRoom) { try { await mpRoom.leave(); } catch (e) {} }
-  mpRoom = null; mpRoomName = ''; mpPeers = [];
-  for (const g of ghosts.values()) scene.remove(g.group);
-  ghosts.clear();
-  mpStatus('', true);
-  updateMenuStats();
+function mpPresenceOf(p) {
+  return p.isMe ? Object.assign({}, mpLocal, { ph: mpPhase }) : (p.presence || {});
+}
+function mpAllReady() {
+  const m = mpMembers();
+  if (m.length < 2) return false;
+  return m.every(p => { const pr = mpPresenceOf(p); return pr.ready === true && !pr.ph; });
+}
+function mpSend() {
+  if (!mpRoom) return;
+  mpSendT = 0.1;
+  mpRoom.presence({
+    x: +px.toFixed(2), y: +py.toFixed(2), z: +pz.toFixed(2), a: +heroAngle.toFixed(2),
+    c: { shirt: colors.shirt, pants: colors.pants, skin: colors.skin },
+    w: wingId(), n: account ? account.name : 'Игрок', d: playing ? 1 : 0,
+    ready: mpLocal.ready, rt: mpLocal.rt, ph: mpPhase, go: mpLocal.go, dx: mpLocal.dx
+  }).catch(() => {});
+}
+function mpOnLocalDeath() {
+  if (mpPhase === 'run' && mpRoom) { mpLocal.dx = mpRunId; mpSend(); }
+}
+function mkBtn(text, act, cls) {
+  const b = document.createElement('button');
+  b.className = cls;
+  b.dataset.act = act;
+  b.textContent = text;
+  return b;
+}
+function mpShowLobby() {
+  show('multi');
   mpRender();
 }
 function mpRender() {
-  const list = document.getElementById('mpList');
-  if (!list) return;
-  list.innerHTML = '';
-  if (!mpRoom) { list.textContent = 'Вы не в комнате'; return; }
-  const me = document.createElement('div');
-  me.textContent = '• ' + (account ? account.name : 'Вы') + ' (вы)';
-  list.appendChild(me);
-  for (const p of mpPeers) {
-    if (p.isMe) continue;
-    const d = document.createElement('div');
-    const pr = p.presence || {};
-    d.textContent = '• ' + (pr.n || 'Игрок') + (pr.d ? ' — играет' : ' — в меню');
-    list.appendChild(d);
+  const box = document.getElementById('mpBody');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!mpRoom) {
+    const p = document.createElement('p');
+    p.textContent = 'Создайте комнату и отправьте код второму игроку. Он вводит код и нажимает «Готово». Когда оба готовы, вы стартуете вместе.';
+    box.appendChild(p);
+    const inp = document.createElement('input');
+    inp.id = 'mpCode'; inp.className = 'field'; inp.placeholder = 'Код комнаты'; inp.maxLength = 20; inp.autocomplete = 'off';
+    box.appendChild(inp);
+    box.appendChild(mkBtn('Войти по коду', 'mpJoin', 'btn play'));
+    box.appendChild(mkBtn('Создать комнату', 'mpCreate', 'btn sec'));
+    const st = document.createElement('p'); st.id = 'mpStatus'; st.style.minHeight = '1.2em';
+    box.appendChild(st);
+    return;
   }
+  const head = document.createElement('div');
+  head.className = 'big'; head.style.fontSize = '34px';
+  head.textContent = 'КОД: ' + mpRoomName;
+  box.appendChild(head);
+  const members = mpMembers();
+  const list = document.createElement('div');
+  list.style.textAlign = 'left';
+  for (const p of members) {
+    const pr = mpPresenceOf(p);
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.style.setProperty('--rc', pr.ready ? '#9fe8a8' : '#ffcf4a');
+    const meta = document.createElement('div'); meta.className = 'meta';
+    const b = document.createElement('b');
+    b.textContent = p.isMe ? ((account ? account.name : 'Вы') + ' (вы)') : (pr.n || 'Игрок');
+    meta.appendChild(b);
+    row.appendChild(meta);
+    const s = document.createElement('span');
+    s.style.fontWeight = '800';
+    s.textContent = pr.ready ? '✓ Готов' : '… Не готов';
+    row.appendChild(s);
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+  const st = document.createElement('p'); st.id = 'mpStatus'; st.style.minHeight = '1.2em';
+  if (members.some(p => !!mpPresenceOf(p).ph)) st.textContent = 'Идёт забег. Дождитесь окончания и нажмите «Ещё раз».';
+  else if (members.length < 2) st.textContent = 'Ждём второго игрока. Отправьте ему код: ' + mpRoomName;
+  else if (!mpAllReady()) st.textContent = 'Ждём, пока все нажмут «Готово»';
+  else st.textContent = 'Все готовы, запускаем...';
+  box.appendChild(st);
+  box.appendChild(mkBtn(mpLocal.ready ? 'Отменить готовность' : 'Готово', 'mpReady', 'btn play'));
+  box.appendChild(mkBtn('Выйти из комнаты', 'mpLeave', 'btn sec'));
 }
 function nameSprite(text) {
   const c = document.createElement('canvas');
@@ -2027,7 +2074,7 @@ function nameSprite(text) {
 function makeGhost(p) {
   const pr = p.presence || {};
   const col = pr.c || {};
-  const mat = c => new T.MeshStandardMaterial({ color: new T.Color(c || '#888888'), transparent: true, opacity: 0.8, roughness: 0.6 });
+  const mat = c => new T.MeshStandardMaterial({ color: new T.Color(c || '#888888'), transparent: true, opacity: 0.85, roughness: 0.6 });
   const group = new T.Group();
   const torso = new T.Mesh(new T.BoxGeometry(0.55, 0.7, 0.34), mat(col.shirt));
   torso.position.y = 1.08;
@@ -2042,19 +2089,134 @@ function makeGhost(p) {
   group.add(torso, head, legL, legR, label);
   group.position.set(pr.x || 0, pr.y || 0, pr.z || 0);
   scene.add(group);
-  return { group, target: new T.Vector3(pr.x || 0, pr.y || 0, pr.z || 0), angle: pr.a || 0, wings: null, wingId: null, playing: !!pr.d };
+  return { group, target: new T.Vector3(pr.x || 0, pr.y || 0, pr.z || 0), angle: pr.a || 0, wings: null, wingId: null };
 }
+
+function mpToggleReady() {
+  if (!mpRoom || mpPhase !== '') return;
+  mpLocal.ready = !mpLocal.ready;
+  mpLocal.rt = mpLocal.ready ? Date.now() : 0;
+  mpSend();
+  mpRender();
+}
+
+// everyone is ready: put both players on the small arena platform
+function mpEnterArena() {
+  mpRunId = 0;
+  for (const p of mpMembers()) mpRunId = Math.max(mpRunId, Number(mpPresenceOf(p).rt) || 0);
+  mpPhase = 'arena';
+  mpMoved = false;
+  mpLocal.go = null; mpLocal.dx = null;
+  for (const p of platforms) removePlatform(p);
+  for (const c of coins) scene.remove(c.mesh);
+  for (const d of decor) scene.remove(d.g);
+  platforms = []; coins = []; decor = [];
+  mpArenaPlat = makePlatform(0, 0, 0, 4);
+  mpArenaPlat.t = 1;
+  platforms.push(mpArenaPlat);
+  frontier = mpArenaPlat;
+  const labels = mpMembers().map(p => p.peer).sort();
+  const me = mpPeers.find(p => p.isMe);
+  const idx = Math.max(0, me ? labels.indexOf(me.peer) : 0);
+  const n = Math.max(1, labels.length);
+  px = (idx - (n - 1) / 2) * 1.2; pz = 0; py = 0;
+  mpArenaSpawn = { x: px, z: 0 };
+  vx = 0; vz = 0; vy = 0;
+  grounded = true; ground = mpArenaPlat; lastSafe = mpArenaPlat;
+  coyote = 0; jumpBuf = 0; squash = 0; shake = 0; runStepT = 0;
+  shields = upg.shield; runCoins = 0; maxH = 0; deathFloor = -6;
+  doubleUsed = false; abilT = 0; abilCd = 0; abilAge = 0; jumpHeld = false; freezeT = 0;
+  camX = px; camY = 3; camZ = 9.5;
+  targetBiome = 0; shownBiome = -1;
+  playing = true; dying = false; paused = false;
+  stickX = 0; stickZ = 0; stickId = null;
+  stickEl.style.display = 'none';
+  show(null);
+  mpSend();
+}
+
+// someone moved: the arena platform disappears and the shared run begins
+function mpStartRun() {
+  mpSeed = hashStr(mpRoomName + ':' + mpRunId) >>> 0;
+  for (const p of platforms) removePlatform(p);
+  for (const c of coins) scene.remove(c.mesh);
+  for (const d of decor) scene.remove(d.g);
+  platforms = []; coins = []; decor = []; mpArenaPlat = null;
+  resetWorldSeed(mpSeed);
+  platformCount = 0;
+  const landing = makePlatform(0, -3, 0, 4);
+  landing.t = 1;
+  platforms.push(landing);
+  frontier = landing; lastSafe = landing;
+  ground = null; grounded = false; vy = 0;
+  deathFloor = -6; maxH = 0;
+  mpPhase = 'run';
+  spawnAhead();
+  puff(px, 0.5, pz, 14, 0xffe9a8, 2);
+  mpSend();
+}
+
+function mpResetLobby() {
+  mpPhase = ''; mpSeed = null;
+  mpLocal.ready = false; mpLocal.rt = 0; mpLocal.go = null; mpLocal.dx = null;
+  playing = false; dying = false; paused = false;
+  mpArenaPlat = null;
+  resetWorld();
+  mpSend();
+  mpShowLobby();
+}
+
+async function mpJoin(raw) {
+  if (!account) { mpStatus('Сначала войдите в аккаунт', false); return; }
+  const name = mpNormalize(raw);
+  if (name.length < 3) { mpStatus('Код: от 3 символов, латиница, цифры, _ . -', false); return; }
+  if (!roomNs) { mpStatus('Нет связи с комнатами: откройте игру в окне Claude', false); return; }
+  if (mpRoom && mpRoomName === name) return;
+  await mpLeave();
+  mpStatus('Подключаем...', true);
+  try {
+    const room = await roomNs.join(name);
+    mpRoom = room;
+    mpRoomName = name;
+    mpLocal = { ready: false, rt: 0, go: null, dx: null };
+    mpPhase = '';
+    mpUnsubs.push(room.onPeers(ch => { mpPeers = ch.peers; mpRender(); }, e => mpStatus('Связь: ' + e.code, false)));
+    mpUnsubs.push(room.onConnection(c => mpStatus(c ? 'Подключено' : 'Нет связи, переподключаемся...', c), () => {}));
+    mpSend();
+    updateMenuStats();
+    mpRender();
+  } catch (e) {
+    mpStatus('Не удалось войти: ' + (e && e.code ? e.code : 'ошибка'), false);
+  }
+}
+
+async function mpLeave() {
+  for (const u of mpUnsubs) { try { u(); } catch (e) {} }
+  mpUnsubs = [];
+  if (mpRoom) { try { await mpRoom.leave(); } catch (e) {} }
+  mpRoom = null; mpRoomName = ''; mpPeers = [];
+  mpSeed = null; mpArenaPlat = null;
+  mpLocal = { ready: false, rt: 0, go: null, dx: null };
+  if (mpPhase) { mpPhase = ''; playing = false; dying = false; resetWorld(); }
+  for (const g of ghosts.values()) scene.remove(g.group);
+  ghosts.clear();
+  updateMenuStats();
+  mpRender();
+}
+
 function mpTick(dt) {
   if (!mpRoom) return;
-  mpSendT -= dt;
-  if (mpSendT <= 0) {
-    mpSendT = 0.1;
-    mpRoom.presence({
-      x: +px.toFixed(2), y: +py.toFixed(2), z: +pz.toFixed(2), a: +heroAngle.toFixed(2),
-      c: { shirt: colors.shirt, pants: colors.pants, skin: colors.skin },
-      w: wingId(), n: account ? account.name : 'Игрок', d: playing ? 1 : 0
-    }).catch(() => {});
+  if (mpPhase === '' && mpAllReady()) mpEnterArena();
+  if (mpPhase === 'arena') {
+    const inp = getInput();
+    if (!mpMoved && Math.hypot(inp.x, inp.z) > 0.3) { mpMoved = true; mpLocal.go = mpRunId; mpSend(); }
+    const someoneMoved = mpMembers().some(p => !p.isMe && mpPresenceOf(p).go === mpRunId);
+    if (mpMoved || someoneMoved) mpStartRun();
   }
+  if (mpPhase === 'run' && playing && mpMembers().some(p => !p.isMe && mpPresenceOf(p).dx === mpRunId)) die();
+  mpSendT -= dt;
+  if (mpSendT <= 0) mpSend();
+
   const seen = new Set();
   for (const p of mpPeers) {
     if (p.isMe || !p.presence || typeof p.presence.x !== 'number') continue;
@@ -2063,7 +2225,6 @@ function mpTick(dt) {
     if (!g) { g = makeGhost(p); ghosts.set(p.peer, g); }
     g.target.set(p.presence.x, p.presence.y, p.presence.z);
     g.angle = p.presence.a || 0;
-    g.playing = !!p.presence.d;
     const wid = typeof p.presence.w === 'string' && WINGS.includes(p.presence.w) ? p.presence.w : null;
     if (wid !== g.wingId) {
       if (g.wings) g.group.remove(g.wings);
